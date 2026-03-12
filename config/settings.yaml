@@ -1,0 +1,103 @@
+# DalioBot Trading Powerhouse Configuration
+# ==========================================
+
+account:
+  starting_capital: 1000
+  max_position_pct: 0.30        # Never more than 30% in one trade
+  max_daily_loss_pct: 0.05      # Stop trading if down 5% in a day
+  max_drawdown_pct: 0.20        # Halt all trading if down 20% from peak
+
+# Stage 1: Credit Spreads ($500-$2,000)
+# Stage 2: Small CSPs ($2,000-$5,000)
+# Stage 3: Full Flywheel ($5,000-$25,000)
+# Stage 4: Scaled Income ($25,000+)
+
+options_flywheel:
+  # Leveraged ETFs — Stage 3+ only (backtest-validated)
+  # REMOVED: SOXL, NVDL, TSLL (destroyed accounts in backtest)
+  tickers:
+    - TQQQ    # 3x Nasdaq — 203% backtest return, 89% win rate
+    - TNA     # 3x Small Caps — 66% return, 84% win rate
+
+  # Stage 1-2 universe (backtest-validated, sorted by risk-adjusted return)
+  small_account_tickers:
+    - F       # ~$10 — ML: STRONG_BUY (92%), 100% backtest win rate
+    - SOFI    # ~$18 — ML: MODERATE_BUY (74%), 93% win rate
+    - MARA    # ~$9  — 91% win rate, high volatility = fat premiums
+    - NIO     # ~$5  — 98% win rate, cheapest spreads
+    - PLTR    # ~$156 — too expensive for $1K, keep for Stage 3+
+
+  # Entry rules
+  only_trade_red_days: true
+  rsi_min: 30
+  rsi_max: 60
+  rsi_ideal_max: 40             # Below 40 is "perfect" entry
+  vix_max: 25                   # Don't trade if VIX > 25
+
+  # Position rules
+  target_premium_pct: 0.05      # Target 5% premium per 30-day cycle
+  days_to_expiry: 30            # Standard DTE
+  close_at_profit_pct: 0.50     # Close at 50% profit (GTC order)
+
+  # Credit spread specific (Stage 1)
+  spread_width: 5               # $5 wide spreads
+  max_risk_per_spread: 320      # Max risk per spread trade
+  target_credit_pct: 0.33       # Target 33% of spread width as credit
+
+  # Crash playbook
+  ema_cloud_bearish_halt: true  # Stop selling when EMA clouds flip red
+  crash_leap_deploy: true       # Buy LEAPs after crash recovery
+
+macro_regime:
+  # Economic indicators to monitor
+  indicators:
+    - GDP_GROWTH
+    - CPI_YOY
+    - UNEMPLOYMENT
+    - YIELD_CURVE_10Y2Y
+    - VIX
+    - SPY_200SMA
+    - FED_FUNDS_RATE
+    - ISM_PMI
+
+  # Regime definitions
+  regimes:
+    risk_on:
+      description: "Growth rising, inflation stable"
+      allocation_mult: 1.2      # Size up 20%
+    risk_off:
+      description: "Growth falling or inflation spiking"
+      allocation_mult: 0.5      # Size down 50%
+    crisis:
+      description: "VIX > 30, yield curve inverted, market below 200SMA"
+      allocation_mult: 0.0      # All cash, wait for recovery
+    recovery:
+      description: "Post-crisis, clouds resetting bullish"
+      allocation_mult: 1.5      # Most aggressive (LEAP deployment)
+
+ml_signals:
+  # Karpathy self-improvement loop
+  experiment_time_budget_sec: 300   # 5 minutes per experiment
+  features:
+    - rsi_14
+    - macd_signal
+    - bollinger_pct
+    - volume_ratio
+    - iv_rank
+    - put_call_ratio
+    - vix_level
+    - sector_momentum
+    - earnings_proximity
+    - gap_magnitude
+
+  model_type: lightgbm
+  retrain_frequency: weekly
+  min_sharpe_to_deploy: 1.5
+
+broker:
+  name: alpaca
+  paper_trading: true           # START IN PAPER MODE
+  base_url: "https://paper-api.alpaca.markets"
+  # Set these in .env file:
+  # ALPACA_API_KEY=your_key
+  # ALPACA_SECRET_KEY=your_secret

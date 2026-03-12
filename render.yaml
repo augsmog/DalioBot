@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: daliobot-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: FRED_API_KEY
+        sync: false
+      - key: N8N_WEBHOOK_SECRET
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: false
