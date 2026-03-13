@@ -134,28 +134,34 @@ class CapitalFlywheelEngine:
             logger.info("No candidates pass all filters today. No trade.")
             return []
 
-        # Sort by confidence (highest first), then by biggest red day
-        valid_candidates.sort(key=lambda c: (-c.get("confidence", 0.5), c.get("daily_change_pct", 0)))
+        # Calculate edge for each candidate and sort by edge (strongest first)
+        for c in valid_candidates:
+            c["_edge"] = self.calculate_edge_sizing(c, capital, regime_mult)
+        valid_candidates.sort(key=lambda c: -c["_edge"]["edge_score"])
 
-        # Trade ALL valid candidates, not just the best
-        # Divide capital across positions to stay within risk limits
+        # Trade ALL valid candidates, sized by edge
         total_allocated = 0
-        max_total_exposure = capital * 0.80  # Use up to 80% of capital across all positions
+        max_total_exposure = capital * 0.80
 
         for candidate in valid_candidates:
             if total_allocated >= max_total_exposure:
                 logger.info(f"Max total exposure reached (${total_allocated:,.0f}). Stopping.")
                 break
 
+            edge = candidate["_edge"]
             remaining = max_total_exposure - total_allocated
-            candidate_confidence = candidate.get("confidence", 1.0)
-            per_position_max = min(max_position * candidate_confidence, remaining)
+
+            # Position size driven by edge: strong edge = big position, weak = small
+            per_position_max = min(capital * edge["allocation_pct"], remaining)
 
             ticker = candidate["ticker"]
             price = candidate["price"]
-            logger.info(f"Candidate: {ticker} at ${price:.2f} "
-                        f"(change: {candidate['daily_change_pct']:.1f}%, RSI: {candidate['rsi']}, "
-                        f"conf: {candidate_confidence:.2f})")
+            logger.info(
+                f"Candidate: {ticker} at ${price:.2f} | "
+                f"edge={edge['edge_score']:.2f} alloc={edge['allocation_pct']:.1%} "
+                f"(tech={edge['components']['technical']:.2f} prem={edge['components']['premium']:.2f} "
+                f"mag={edge['components']['magnitude']:.2f} regime={edge['components']['regime']:.2f})"
+            )
 
             if stage == AccountStage.CREDIT_SPREADS:
                 signal = self._generate_credit_spread_signal(candidate, capital, per_position_max)
@@ -199,9 +205,12 @@ class CapitalFlywheelEngine:
         estimated_credit = spread_width * target_credit_pct * 100  # Per contract
         max_loss = (spread_width * 100) - estimated_credit
 
-        # Position sizing: how many spreads can we afford?
+        # Position sizing: edge-based
+        edge = candidate.get("_edge", {})
+        edge_mult = edge.get("contracts_mult", 1.0)
         max_contracts = int(max_position / max_loss) if max_loss > 0 else 1
-        contracts = max(1, min(max_contracts, 3))
+        # Scale by edge multiplier but cap at what capital allows
+        contracts = max(1, min(int(max_contracts * min(edge_mult, 1.0)), max_contracts))
 
         if max_loss * contracts > capital * 0.30:
             contracts = max(1, int((capital * 0.30) / max_loss))
@@ -249,10 +258,16 @@ class CapitalFlywheelEngine:
         # Can we afford it?
         if collateral > max_position:
             logger.info(f"CSP on {ticker} requires ${collateral:.0f} collateral, "
-                        f"exceeds max position ${max_position:.0f}. Consider credit spread instead.")
+                        f"exceeds max position ${max_position:.0f}. Falling back to credit spread.")
             return self._generate_credit_spread_signal(candidate, capital, max_position)
 
-        contracts = max(1, int(max_position / collateral))
+        # Edge-based sizing: strong edge = more contracts
+        edge = candidate.get("_edge", {})
+        edge_score = edge.get("edge_score", 0.5)
+        max_contracts = max(1, int(max_position / collateral))
+        # Scale contracts: weak edge (0.2) = 1 contract, strong edge (0.8) = max
+        edge_fraction = min(1.0, edge_score / 0.6)  # Normalize so 0.6+ edge = full size
+        contracts = max(1, int(max_contracts * edge_fraction))
 
         confidence = self._calculate_confidence(candidate)
 
@@ -266,9 +281,10 @@ class CapitalFlywheelEngine:
             contracts=contracts,
             confidence=confidence,
             max_loss=(collateral - estimated_premium) * contracts,
-            reason=f"Cash-secured put on {ticker} at ${strike}. "
-                   f"Premium ~${estimated_premium:.0f}/contract. "
-                   f"RSI={candidate['rsi']}, daily change={candidate['daily_change_pct']}%",
+            reason=f"CSP {ticker} ${strike}P x{contracts}. "
+                   f"Edge={edge_score:.2f} (alloc={edge.get('allocation_pct', 0):.1%}). "
+                   f"RSI={candidate['rsi']}, IV={candidate.get('iv_rank', '?')}, "
+                   f"chg={candidate['daily_change_pct']}%",
             rsi=candidate["rsi"],
             iv_rank=candidate["iv_rank"],
             daily_change=candidate["daily_change_pct"],
@@ -304,6 +320,90 @@ class CapitalFlywheelEngine:
             score += 0.1
 
         return round(min(1.0, max(0.0, score)), 2)
+
+    def calculate_edge_sizing(
+        self, candidate: dict, capital: float, regime_mult: float
+    ) -> dict:
+        """Calculate position size based on perceived edge strength.
+
+        Uses a modified Kelly Criterion: size = edge * kelly_fraction
+        Higher edge = larger allocation. Weak edge = minimum size.
+
+        Returns dict with: allocation_pct, contracts_mult, edge_score, edge_components
+        """
+        components = {}
+
+        # 1. Technical edge (0-0.3): RSI sweet spot + trend alignment
+        rsi = candidate.get("rsi", 50)
+        tech_edge = 0.0
+        if 30 <= rsi <= 40:
+            tech_edge = 0.25  # Ideal: oversold but not capitulating
+        elif 40 < rsi <= 50:
+            tech_edge = 0.15  # Good: normal pullback
+        elif 25 <= rsi < 30:
+            tech_edge = 0.05  # Risky: very oversold
+        elif 50 < rsi <= 65:
+            tech_edge = 0.08  # Weak: not really a pullback
+
+        if candidate.get("ema_cloud_bullish"):
+            tech_edge += 0.05  # Trend confirmation bonus
+        components["technical"] = round(tech_edge, 3)
+
+        # 2. Premium edge (0-0.3): IV rank determines how rich premiums are
+        iv_rank = candidate.get("iv_rank")
+        premium_edge = 0.0
+        if iv_rank is not None:
+            if iv_rank > 70:
+                premium_edge = 0.30  # Very rich premiums
+            elif iv_rank > 50:
+                premium_edge = 0.20  # Good premiums
+            elif iv_rank > 30:
+                premium_edge = 0.10  # Decent premiums
+            else:
+                premium_edge = 0.02  # Lean premiums, minimal edge
+        else:
+            premium_edge = 0.10  # Unknown, assume moderate
+        components["premium"] = round(premium_edge, 3)
+
+        # 3. Magnitude edge (0-0.2): how big the red day is
+        daily_change = abs(candidate.get("daily_change_pct", 0))
+        if 1.0 <= daily_change <= 3.0:
+            mag_edge = 0.15  # Sweet spot: meaningful drop, not panic
+        elif 3.0 < daily_change <= 5.0:
+            mag_edge = 0.10  # Bigger drop, fatter premium but more risk
+        elif daily_change > 5.0:
+            mag_edge = 0.0   # Panic selling — stay out or go tiny
+        else:
+            mag_edge = 0.05  # Small red day, small edge
+        components["magnitude"] = round(mag_edge, 3)
+
+        # 4. Regime edge (0-0.2): macro environment
+        regime_edge = min(0.2, max(0.0, (regime_mult - 0.5) * 0.3))
+        components["regime"] = round(regime_edge, 3)
+
+        # Total edge: 0.0 - 1.0
+        raw_edge = tech_edge + premium_edge + mag_edge + regime_edge
+        edge_score = round(min(1.0, raw_edge), 3)
+
+        # Kelly fraction: allocate proportional to edge
+        # Conservative Kelly: use half-Kelly to reduce variance
+        # Minimum 5% allocation (so we still trade weak signals small)
+        # Maximum 30% allocation (hard cap per position)
+        half_kelly = edge_score * 0.5
+        allocation_pct = min(0.30, max(0.05, half_kelly))
+
+        # Regime multiplier scales everything
+        allocation_pct *= regime_mult
+
+        # Contract multiplier: 1x at weak edge, up to 3x at strong edge
+        contracts_mult = max(1.0, edge_score * 4.0)
+
+        return {
+            "edge_score": edge_score,
+            "allocation_pct": round(allocation_pct, 3),
+            "contracts_mult": round(contracts_mult, 1),
+            "components": components,
+        }
 
     def create_exit_order(self, position: Position) -> dict:
         """Create the GTC buy-to-close order at 50% profit."""
