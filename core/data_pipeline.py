@@ -273,10 +273,25 @@ class MarketDataPipeline:
 
             # Apply filters
             is_red = daily_change < 0
-            rsi_ok = rsi is not None and 30 <= rsi <= 60
+            rsi_ok = rsi is not None and 25 <= rsi <= 65
             cloud_ok = ema_bullish is not False  # Allow if bullish or unknown
 
             iv_rank = self.get_iv_rank(ticker)
+
+            # Confidence score: 1.0 = ideal, lower = riskier but still tradeable
+            confidence = 1.0
+            if not cloud_ok:
+                confidence *= 0.6  # Bearish cloud = lower confidence, not blocked
+            if rsi is not None:
+                if rsi < 30:
+                    confidence *= 0.7  # Oversold — higher bounce risk
+                elif rsi > 60:
+                    confidence *= 0.8  # Not ideal zone
+            if iv_rank and iv_rank > 70:
+                confidence *= 1.2  # High IV = fatter premiums
+
+            # Hard gates: must be a red day, RSI must be in wider range
+            passes = is_red and rsi_ok
 
             candidates.append({
                 "ticker": ticker,
@@ -288,7 +303,8 @@ class MarketDataPipeline:
                 "is_red": is_red,
                 "rsi_in_range": rsi_ok,
                 "cloud_ok": cloud_ok,
-                "passes_all": is_red and rsi_ok and cloud_ok,
+                "confidence": round(confidence, 2),
+                "passes_all": passes,
             })
 
         # Sort by daily change (most red first)

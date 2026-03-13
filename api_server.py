@@ -17,6 +17,7 @@ Endpoints:
 Run: uvicorn api_server:app --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import datetime as dt
 import hashlib
 import hmac
@@ -33,6 +34,26 @@ from loguru import logger
 load_dotenv(Path(__file__).parent / ".env")
 
 app = FastAPI(title="DalioBot Trading API", version="1.0.0")
+
+
+async def self_ping():
+    """Keep-alive: ping own health endpoint every 10 minutes to prevent Render cold starts."""
+    import httpx
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        return  # Not on Render, skip
+    while True:
+        await asyncio.sleep(600)  # 10 minutes
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(f"{render_url}/health", timeout=10)
+        except Exception:
+            pass
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(self_ping())
 
 WEBHOOK_SECRET = os.getenv("N8N_WEBHOOK_SECRET", "")
 

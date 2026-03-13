@@ -13,5 +13,7 @@ services:
         sync: false
       - key: N8N_WEBHOOK_SECRET
         sync: false
+      - key: RENDER_EXTERNAL_URL
+        value: https://daliobot.onrender.com
     healthCheckPath: /health
     autoDeploy: false

@@ -193,21 +193,19 @@ class FlywheelBacktester:
         if row.get("daily_return", 0) >= 0:
             return False
 
-        # RSI between 30-60
+        # RSI between 25-65 (wider range)
         rsi = row.get("rsi")
         if rsi is None or pd.isna(rsi):
             return False
-        if not (30 <= rsi <= 60):
-            return False
-
-        # EMA clouds must be bullish (crash protection)
-        if row.get("ema_bullish") is False:
+        if not (25 <= rsi <= 65):
             return False
 
         # Capital check
         if self.capital < 200:
             return False
 
+        # EMA cloud bearish = reduce position size (handled in _enter_trade)
+        # but still allow the trade
         return True
 
     def _enter_trade(self, row, date_str: str, ticker: str, strategy: str) -> Optional[dict]:
@@ -215,6 +213,10 @@ class FlywheelBacktester:
         price = float(row["Close"])
         atr = float(row["atr"]) if not pd.isna(row.get("atr", np.nan)) else price * 0.02
         max_risk = self.capital * 0.30
+
+        # Scale down position when EMA cloud is bearish
+        if row.get("ema_bullish") is False:
+            max_risk *= 0.5
 
         if strategy == "credit_spread":
             # Adapt spread width to account size

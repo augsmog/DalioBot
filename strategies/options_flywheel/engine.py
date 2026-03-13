@@ -134,8 +134,15 @@ class CapitalFlywheelEngine:
             logger.info("No candidates pass all filters today. No trade.")
             return []
 
-        # Take the biggest red ticker (first in sorted list)
+        # Sort by confidence (highest first), then by biggest red day
+        valid_candidates.sort(key=lambda c: (-c.get("confidence", 0.5), c.get("daily_change_pct", 0)))
+
+        # Take the best candidate
         best = valid_candidates[0]
+
+        # Scale position by candidate confidence
+        candidate_confidence = best.get("confidence", 1.0)
+        max_position *= candidate_confidence
         ticker = best["ticker"]
         price = best["price"]
 

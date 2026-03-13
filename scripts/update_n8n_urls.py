@@ -66,11 +66,12 @@ def update_workflow_urls(workflow_id: str, workflow_name: str, new_api_url: str)
     if updated:
         # Update the workflow
         update_payload = {
+            "name": workflow.get("name", workflow_name),
             "nodes": nodes,
             "connections": workflow.get("connections", {}),
             "settings": workflow.get("settings", {}),
         }
-        resp = requests.patch(
+        resp = requests.put(
             f"{N8N_URL}/api/v1/workflows/{workflow_id}",
             headers=HEADERS,
             json=update_payload,
@@ -88,16 +89,15 @@ def update_workflow_urls(workflow_id: str, workflow_name: str, new_api_url: str)
 
 def activate_workflow(workflow_id: str, workflow_name: str) -> bool:
     """Activate a workflow."""
-    resp = requests.patch(
-        f"{N8N_URL}/api/v1/workflows/{workflow_id}",
+    resp = requests.post(
+        f"{N8N_URL}/api/v1/workflows/{workflow_id}/activate",
         headers=HEADERS,
-        json={"active": True},
     )
     if resp.status_code == 200:
         print(f"  Activated: {workflow_name}")
         return True
     else:
-        print(f"  Failed to activate {workflow_name}: {resp.status_code}")
+        print(f"  Failed to activate {workflow_name}: {resp.status_code} {resp.text[:200]}")
         return False
 
 
