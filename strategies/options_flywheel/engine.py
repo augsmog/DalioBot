@@ -137,28 +137,38 @@ class CapitalFlywheelEngine:
         # Sort by confidence (highest first), then by biggest red day
         valid_candidates.sort(key=lambda c: (-c.get("confidence", 0.5), c.get("daily_change_pct", 0)))
 
-        # Take the best candidate
-        best = valid_candidates[0]
+        # Trade ALL valid candidates, not just the best
+        # Divide capital across positions to stay within risk limits
+        total_allocated = 0
+        max_total_exposure = capital * 0.80  # Use up to 80% of capital across all positions
 
-        # Scale position by candidate confidence
-        candidate_confidence = best.get("confidence", 1.0)
-        max_position *= candidate_confidence
-        ticker = best["ticker"]
-        price = best["price"]
+        for candidate in valid_candidates:
+            if total_allocated >= max_total_exposure:
+                logger.info(f"Max total exposure reached (${total_allocated:,.0f}). Stopping.")
+                break
 
-        logger.info(f"Best candidate: {ticker} at ${price:.2f} "
-                    f"(change: {best['daily_change_pct']:.1f}%, RSI: {best['rsi']})")
+            remaining = max_total_exposure - total_allocated
+            candidate_confidence = candidate.get("confidence", 1.0)
+            per_position_max = min(max_position * candidate_confidence, remaining)
 
-        if stage == AccountStage.CREDIT_SPREADS:
-            signal = self._generate_credit_spread_signal(best, capital, max_position)
-        elif stage == AccountStage.SMALL_CSPS:
-            signal = self._generate_csp_signal(best, capital, max_position)
-        else:
-            signal = self._generate_csp_signal(best, capital, max_position)
+            ticker = candidate["ticker"]
+            price = candidate["price"]
+            logger.info(f"Candidate: {ticker} at ${price:.2f} "
+                        f"(change: {candidate['daily_change_pct']:.1f}%, RSI: {candidate['rsi']}, "
+                        f"conf: {candidate_confidence:.2f})")
 
-        if signal:
-            signals.append(signal)
+            if stage == AccountStage.CREDIT_SPREADS:
+                signal = self._generate_credit_spread_signal(candidate, capital, per_position_max)
+            elif stage == AccountStage.SMALL_CSPS:
+                signal = self._generate_csp_signal(candidate, capital, per_position_max)
+            else:
+                signal = self._generate_csp_signal(candidate, capital, per_position_max)
 
+            if signal:
+                signals.append(signal)
+                total_allocated += signal.collateral_required
+
+        logger.info(f"Generated {len(signals)} signals, total allocated: ${total_allocated:,.0f}")
         return signals
 
     def _generate_credit_spread_signal(
