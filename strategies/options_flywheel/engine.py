@@ -255,6 +255,7 @@ class CapitalFlywheelEngine:
             collateral_required=collateral * contracts,
             contracts=contracts,
             confidence=confidence,
+            max_loss=(collateral - estimated_premium) * contracts,
             reason=f"Cash-secured put on {ticker} at ${strike}. "
                    f"Premium ~${estimated_premium:.0f}/contract. "
                    f"RSI={candidate['rsi']}, daily change={candidate['daily_change_pct']}%",

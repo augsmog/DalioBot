@@ -24,6 +24,8 @@ try:
         MarketOrderRequest,
         LimitOrderRequest,
         GetOrdersRequest,
+        GetOptionContractsRequest,
+        OptionLegRequest,
     )
     from alpaca.trading.enums import (
         OrderSide,
@@ -31,6 +33,7 @@ try:
         OrderType,
         OrderStatus,
         QueryOrderStatus,
+        OrderClass,
     )
     ALPACA_AVAILABLE = True
 except ImportError:
@@ -234,33 +237,138 @@ class AlpacaBroker:
     # The methods below provide the interface — actual implementation depends
     # on Alpaca SDK version and account permissions.
 
-    def place_options_order(self, order_params: dict) -> Optional[dict]:
-        """Place an options order.
+    def _find_option_contract(self, ticker: str, strike: float, expiry: str, option_type: str = "put") -> Optional[str]:
+        """Find the OCC option symbol for given parameters."""
+        try:
+            req = GetOptionContractsRequest(
+                underlying_symbols=[ticker],
+                expiration_date_gte=expiry,
+                expiration_date_lte=expiry,
+                strike_price_gte=str(strike),
+                strike_price_lte=str(strike),
+                type=option_type,
+                limit=5,
+            )
+            result = self.client.get_option_contracts(req)
+            contracts = result.option_contracts if hasattr(result, 'option_contracts') else []
+            if contracts:
+                return contracts[0].symbol
+            # Try nearby expiry dates if exact match not found
+            from datetime import datetime, timedelta
+            exp_date = datetime.strptime(expiry, "%Y-%m-%d")
+            for delta in range(-3, 4):
+                try_date = (exp_date + timedelta(days=delta)).strftime("%Y-%m-%d")
+                req = GetOptionContractsRequest(
+                    underlying_symbols=[ticker],
+                    expiration_date_gte=try_date,
+                    expiration_date_lte=try_date,
+                    strike_price_gte=str(strike),
+                    strike_price_lte=str(strike),
+                    type=option_type,
+                    limit=5,
+                )
+                result = self.client.get_option_contracts(req)
+                contracts = result.option_contracts if hasattr(result, 'option_contracts') else []
+                if contracts:
+                    logger.info(f"Found contract on nearby date {try_date}: {contracts[0].symbol}")
+                    return contracts[0].symbol
+            return None
+        except Exception as e:
+            logger.error(f"Failed to find option contract: {e}")
+            return None
 
-        For credit spreads and CSPs, we need to use Alpaca's options endpoints.
-        This is a structured interface that can adapt to API changes.
+    def place_options_order(self, order_params: dict) -> Optional[dict]:
+        """Place an options order via Alpaca API.
+
+        Supports:
+        - SELL_CREDIT_SPREAD: Multi-leg order (sell put + buy lower put)
+        - SELL_PUT (CSP): Single leg sell put
         """
         if not self.connected:
             logger.error("Not connected to broker")
             return None
 
-        logger.info(f"OPTIONS ORDER: {order_params}")
+        action = order_params.get("action", "")
+        ticker = order_params.get("ticker")
+        strike = order_params.get("strike")
+        expiry = order_params.get("expiry")
+        contracts = order_params.get("contracts", 1)
+        spread_width = order_params.get("spread_width", 2)
 
-        # Log the intended trade for manual execution if API not available
-        trade_instruction = {
-            "action": order_params.get("action"),
-            "ticker": order_params.get("ticker"),
-            "strike": order_params.get("strike"),
-            "expiry": order_params.get("expiry"),
-            "contracts": order_params.get("contracts"),
-            "limit_price": order_params.get("limit_price"),
-            "order_type": "GTC",
-            "timestamp": dt.datetime.now().isoformat(),
-            "status": "INSTRUCTION_GENERATED",
-            "note": "Execute via broker platform if API options trading not available",
-        }
+        logger.info(f"OPTIONS ORDER: {action} {ticker} {strike}P exp={expiry} x{contracts}")
 
-        return trade_instruction
+        try:
+            if "CREDIT_SPREAD" in action:
+                # Credit spread: sell higher strike put, buy lower strike put
+                short_symbol = self._find_option_contract(ticker, strike, expiry, "put")
+                long_strike = strike - spread_width
+                long_symbol = self._find_option_contract(ticker, long_strike, expiry, "put")
+
+                if not short_symbol or not long_symbol:
+                    logger.error(f"Could not find option contracts: short={short_symbol} long={long_symbol}")
+                    return {"status": "FAILED", "error": "Contract not found",
+                            "short_symbol": short_symbol, "long_symbol": long_symbol}
+
+                logger.info(f"Credit spread: SELL {short_symbol} / BUY {long_symbol}")
+
+                # Multi-leg order
+                order = LimitOrderRequest(
+                    symbol=short_symbol,
+                    qty=contracts,
+                    side=OrderSide.SELL,
+                    type=OrderType.LIMIT,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=order_params.get("limit_price", 0.50),
+                    order_class=OrderClass.MLEG,
+                    legs=[
+                        OptionLegRequest(
+                            symbol=long_symbol,
+                            ratio_qty=1,
+                            side=OrderSide.BUY,
+                        )
+                    ],
+                )
+                result = self.client.submit_order(order)
+
+            elif "SELL_PUT" in action or "CSP" in action:
+                # Cash-secured put: sell put
+                put_symbol = self._find_option_contract(ticker, strike, expiry, "put")
+                if not put_symbol:
+                    logger.error(f"Could not find put contract for {ticker} {strike}P {expiry}")
+                    return {"status": "FAILED", "error": "Contract not found"}
+
+                logger.info(f"CSP: SELL {put_symbol}")
+
+                order = LimitOrderRequest(
+                    symbol=put_symbol,
+                    qty=contracts,
+                    side=OrderSide.SELL,
+                    type=OrderType.LIMIT,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=order_params.get("limit_price", 1.00),
+                )
+                result = self.client.submit_order(order)
+            else:
+                logger.error(f"Unknown action: {action}")
+                return {"status": "FAILED", "error": f"Unknown action: {action}"}
+
+            order_result = {
+                "status": "SUBMITTED",
+                "order_id": str(result.id),
+                "symbol": result.symbol,
+                "side": str(result.side),
+                "qty": str(result.qty),
+                "order_type": str(result.type),
+                "limit_price": str(result.limit_price) if result.limit_price else None,
+                "submitted_at": str(result.submitted_at),
+                "timestamp": dt.datetime.now().isoformat(),
+            }
+            logger.info(f"Order submitted: {order_result}")
+            return order_result
+
+        except Exception as e:
+            logger.error(f"Failed to place options order: {e}")
+            return {"status": "FAILED", "error": str(e), "timestamp": dt.datetime.now().isoformat()}
 
     def get_options_positions(self) -> list[dict]:
         """Get open options positions."""

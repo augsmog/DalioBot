@@ -168,13 +168,15 @@ async def webhook_morning():
 
         # Execute if broker connected
         if broker.connected:
+            limit_price = signal.premium / signal.contracts / 100 if signal.contracts else 0.50
             order = broker.place_options_order({
                 "action": signal.action,
                 "ticker": signal.ticker,
                 "strike": signal.strike,
                 "expiry": signal.expiry,
                 "contracts": signal.contracts,
-                "limit_price": signal.premium / signal.contracts / 100,
+                "spread_width": signal.spread_width or 2,
+                "limit_price": round(limit_price, 2),
             })
             sig_dict["order"] = order
 
