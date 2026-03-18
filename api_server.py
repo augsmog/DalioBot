@@ -63,6 +63,19 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def is_market_hours() -> bool:
+    """Check if US stock market is currently open (or within 30 min of open/close)."""
+    from zoneinfo import ZoneInfo
+    now = dt.datetime.now(ZoneInfo("America/New_York"))
+    # Weekday check (Mon=0, Fri=4)
+    if now.weekday() > 4:
+        return False
+    # Market hours: 9:30 AM - 4:00 PM ET (with 30 min buffer)
+    market_open = now.replace(hour=9, minute=0, second=0)
+    market_close = now.replace(hour=16, minute=30, second=0)
+    return market_open <= now <= market_close
+
+
 def verify_webhook(request_body: bytes, signature: str) -> bool:
     """Verify webhook signature from n8n."""
     if not WEBHOOK_SECRET:
@@ -80,6 +93,10 @@ async def health():
 @app.post("/webhook/morning")
 async def webhook_morning():
     """Run the 5-minute morning routine and return results as JSON."""
+    if not is_market_hours():
+        return {"timestamp": dt.datetime.now().isoformat(), "routine": "morning",
+                "action": "MARKET_CLOSED", "message": "Outside market hours, skipping."}
+
     from core.data_pipeline import MarketDataPipeline
     from core.risk_manager import RiskManager
     from core.broker import AlpacaBroker
@@ -137,16 +154,28 @@ async def webhook_morning():
         result["action"] = "CRISIS_HALT"
         return result
 
-    # Scan tickers
+    # Scan ALL tickers (use full universe with $100K account)
     stage = flywheel.get_account_stage(capital)
-    if stage.value <= 2:
-        tickers = config["options_flywheel"]["small_account_tickers"]
-    else:
-        tickers = config["options_flywheel"]["tickers"]
+    all_tickers = (
+        config["options_flywheel"]["small_account_tickers"] +
+        config["options_flywheel"]["tickers"]
+    )
 
-    candidates = pipeline.screen_for_puts(tickers)
+    candidates = pipeline.screen_for_puts(all_tickers)
+
+    # Filter out tickers we already hold positions in
+    held_tickers = set()
+    for p in positions:
+        for t in all_tickers:
+            if p["symbol"].startswith(t):
+                held_tickers.add(t)
+    for c in candidates:
+        if c["ticker"] in held_tickers:
+            c["passes_all"] = False
+
     result["candidates"] = candidates
     result["stage"] = stage.name
+    result["held_tickers"] = list(held_tickers)
 
     # Generate signals
     signals = flywheel.generate_signals(candidates, capital, regime.regime)
